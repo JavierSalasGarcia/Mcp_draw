@@ -12,10 +12,16 @@ from pathlib import Path
 from datetime import datetime
 
 import anthropic
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from inkscape_controller import InkscapeController
-from svg_utils import clean_svg_response, extract_svg_elements
+from svg_utils import (
+    clean_svg_response,
+    extract_svg_elements,
+    render_svg_to_png,
+    validate_svg_detailed,
+    optimize_svg,
+)
 
 # ── servidor MCP ─────────────────────────────────────────────────────────────
 
@@ -33,7 +39,7 @@ _output_dir = Path.home() / "mcp_draw_figures"
 _output_dir.mkdir(exist_ok=True)
 
 _session = {
-    "current_svg": None,       # Path al SVG activo
+    "current_svg": None,
     "inkscape": InkscapeController(),
 }
 
@@ -57,53 +63,65 @@ Tipo de figura: {figure_type}
 ESTRUCTURA SVG:
 • viewBox="0 0 800 600" — ajusta la altura si el contenido lo requiere
 • Todo elemento visible DEBE tener un id semántico y descriptivo:
-    - Bloques/cajas:     id="block-[nombre]"     ej. id="block-clasificador"
-    - Flechas/conectores: id="arrow-[origen]-[destino]"  ej. id="arrow-entrada-clasificador"
-    - Etiquetas de texto: id="label-[nombre]"    ej. id="label-precision"
-    - Decisiones (rombos): id="decision-[condicion]"  ej. id="decision-umbral"
-    - Nodos de grafo:    id="node-[nombre]"      ej. id="node-sensor1"
+    - Bloques/cajas:       id="block-[nombre]"           ej. id="block-clasificador"
+    - Flechas/conectores:  id="arrow-[origen]-[destino]" ej. id="arrow-entrada-clasificador"
+    - Etiquetas de texto:  id="label-[nombre]"           ej. id="label-precision"
+    - Decisiones (rombos): id="decision-[condicion]"     ej. id="decision-umbral"
+    - Nodos de grafo:      id="node-[nombre]"            ej. id="node-sensor1"
 • Agrupa elementos relacionados con <g id="layer-bloques">, <g id="layer-flechas">, etc.
-• Define flechas con <defs><marker> reutilizable
+• Define flechas reutilizables con <defs><marker>
 
 ESTILO (IEEE Publication Style):
-• Fuente: font-family="Arial, Helvetica, sans-serif"
-• Bloques rectangulares:   fill="#EBF4FA" stroke="#2C5F8A" stroke-width="1.5"
-• Bloques proceso:         fill="#F5F5F5" stroke="#333333" stroke-width="1.5"
-• Rombos de decisión:      fill="#FFF9E6" stroke="#8B6914" stroke-width="1.5"
-• Nodos inicio/fin:        fill="#D5E8D4" stroke="#82B366" stroke-width="1.5" rx="20"
-• Flechas:                 stroke="#333333" stroke-width="1.5" fill="none"
-• Texto principal:         font-size="14" fill="#1A1A1A"
-• Texto secundario:        font-size="12" fill="#444444"
+• Fuente:               font-family="Arial, Helvetica, sans-serif"
+• Bloques rectangulares: fill="#EBF4FA" stroke="#2C5F8A" stroke-width="1.5"
+• Bloques proceso:       fill="#F5F5F5" stroke="#333333" stroke-width="1.5"
+• Rombos de decisión:    fill="#FFF9E6" stroke="#8B6914" stroke-width="1.5"
+• Nodos inicio/fin:      fill="#D5E8D4" stroke="#82B366" stroke-width="1.5" rx="20"
+• Flechas:               stroke="#333333" stroke-width="1.5" fill="none"
+• Texto principal:       font-size="14" fill="#1A1A1A"
+• Texto secundario:      font-size="12" fill="#444444"
 • Separación mínima entre elementos: 50px
 
 TIPOS DE FIGURA:
 • block_diagram — Bloques rectangulares con flechas, flujo izquierda→derecha o arriba→abajo
-• flowchart     — Procesos (rect), decisiones (rombo), inicio/fin (rect redondeado), con flechas direccionales
+• flowchart     — Procesos (rect), decisiones (rombo), inicio/fin (rect redondeado)
 • graph         — Nodos (círculos) con aristas etiquetadas
 • auto          — Infiere el tipo a partir del boceto y el pie de figura
 
 SALIDA:
-Devuelve ÚNICAMENTE el código SVG válido y completo. Sin markdown, sin explicaciones, solo el SVG.
+Devuelve ÚNICAMENTE el código SVG válido y completo. Sin markdown, sin explicaciones.
 """
 
 _PROMPT_EDITAR = """\
-Eres un editor de figuras SVG científicas. Tu tarea es aplicar exactamente \
-el cambio solicitado sobre la figura actual.
+Eres un editor de figuras SVG científicas. Aplica exactamente el cambio solicitado.
 
 SVG actual:
 {current_svg}
 
-Instrucción del usuario: {instruction}
+Instrucción: {instruction}
 
 REGLAS:
-1. Devuelve ÚNICAMENTE el SVG completo modificado, sin markdown ni explicaciones
+1. Devuelve ÚNICAMENTE el SVG completo modificado — sin markdown ni explicaciones
 2. Aplica EXACTAMENTE el cambio pedido, sin modificar nada más
-3. Conserva todos los id de elementos existentes
-4. Mantén el viewBox y dimensiones originales salvo que se pida explícitamente cambiarlos
+3. Conserva todos los id existentes
+4. Mantén el viewBox y dimensiones originales salvo que se pida cambiarlos
 5. Si añades un elemento nuevo, dale un id semántico siguiendo la convención existente
 6. Mantén el mismo estilo visual y calidad profesional
 
 SVG modificado:
+"""
+
+_PROMPT_VERIFICAR = """\
+Acabas de generar o editar esta figura SVG. Obsérvala visualmente y evalúa:
+
+1. ¿Los elementos están bien posicionados y no se superponen?
+2. ¿Las flechas conectan correctamente los bloques/nodos?
+3. ¿El texto es legible y está centrado dentro de sus elementos?
+4. ¿El estilo es consistente y apropiado para una publicación científica?
+5. ¿La figura refleja fielmente lo que describe el pie: "{caption}"?
+
+Si detectas algún problema, descríbelo con precisión para poder corregirlo \
+con edit_figure(). Si todo se ve bien, confírmalo brevemente.
 """
 
 
@@ -149,10 +167,10 @@ def create_figure(
     Args:
         sketch_path: Ruta completa a la imagen del boceto (JPG, PNG)
         caption: Pie de figura que describe qué debe mostrar la imagen
-        figure_type: Tipo de figura — 'block_diagram', 'flowchart', 'graph' o 'auto' (por defecto)
+        figure_type: 'block_diagram', 'flowchart', 'graph' o 'auto' (por defecto)
 
     Returns:
-        Ruta al archivo SVG generado (se abre automáticamente en Inkscape)
+        Ruta al SVG generado. Usa render_preview() para verificar el resultado visualmente.
     """
     image_data, media_type = _encode_image(sketch_path)
     client = _client()
@@ -188,40 +206,82 @@ def create_figure(
     out = _svg_path("figura")
     out.write_text(svg, encoding="utf-8")
     _session["current_svg"] = str(out)
+    _session["caption"] = caption
 
     inkscape_msg = _session["inkscape"].open_file(str(out))
 
     return (
-        f"Figura creada exitosamente.\n"
-        f"Archivo SVG: {out}\n"
+        f"Figura creada.\n"
+        f"SVG: {out}\n"
         f"Inkscape: {inkscape_msg}\n\n"
-        f"Usa edit_figure() para solicitar cambios en lenguaje natural."
+        f"Usa render_preview() para que pueda ver cómo quedó y verificar que "
+        f"el resultado es correcto antes de hacer ajustes."
     )
+
+
+@mcp.tool()
+def render_preview(svg_path: str = None, width: int = 900) -> Image:
+    """Renderiza la figura a PNG para inspección visual.
+
+    Permite a Claude ver cómo se ve realmente la figura generada o editada,
+    cerrando el ciclo de retroalimentación visual. Úsalo después de
+    create_figure() o edit_figure() para verificar el resultado.
+
+    Args:
+        svg_path: SVG a renderizar (usa la figura actual si se omite)
+        width: Ancho del PNG en píxeles (por defecto 900)
+
+    Returns:
+        Imagen PNG de la figura para inspección visual
+    """
+    target = svg_path or _session.get("current_svg")
+    if not target:
+        raise ValueError(
+            "No hay ninguna figura abierta. Usa create_figure() primero."
+        )
+
+    preview_path = str(Path(target).with_suffix(".preview.png"))
+    error = render_svg_to_png(
+        svg_path=target,
+        output_path=preview_path,
+        width=width,
+        inkscape_exe=_session["inkscape"]._exe,
+    )
+
+    if error:
+        raise RuntimeError(
+            f"No se pudo renderizar la figura: {error}\n"
+            f"Verifica que Inkscape esté instalado correctamente."
+        )
+
+    return Image(data=Path(preview_path).read_bytes(), format="png")
 
 
 @mcp.tool()
 def edit_figure(instruction: str, svg_path: str = None) -> str:
     """Edita la figura actual con una instrucción en lenguaje natural.
 
-    Ejemplos de instrucciones:
+    Después de editar, usa render_preview() para verificar visualmente que
+    el cambio quedó como se esperaba.
+
+    Ejemplos:
     - "Cambia el color del bloque clasificador a azul oscuro"
-    - "Agrega una flecha de retroalimentación del bloque de salida al de entrada"
-    - "Añade un nuevo bloque llamado 'Post-procesamiento' después del clasificador"
+    - "Agrega una flecha de retroalimentación del bloque salida al de entrada"
+    - "Añade un nuevo bloque llamado Post-procesamiento después del clasificador"
     - "Aumenta el tamaño de fuente de todas las etiquetas a 16px"
-    - "Cambia el rombo de decisión a color naranja claro"
 
     Args:
         instruction: Qué cambiar, en español o inglés
-        svg_path: Ruta al SVG a editar (usa la figura actual si se omite)
+        svg_path: SVG a editar (usa la figura actual si se omite)
 
     Returns:
-        Confirmación del cambio con ruta al archivo actualizado
+        Confirmación del cambio. Sigue con render_preview() para verificar.
     """
-    target = svg_path or _session["current_svg"]
+    target = svg_path or _session.get("current_svg")
     if not target:
         return (
             "No hay ninguna figura abierta. "
-            "Usa create_figure() primero para generar una figura desde un boceto."
+            "Usa create_figure() primero."
         )
 
     current_svg = Path(target).read_text(encoding="utf-8")
@@ -249,8 +309,72 @@ def edit_figure(instruction: str, svg_path: str = None) -> str:
 
     return (
         f"Figura actualizada.\n"
-        f"Archivo: {target}\n"
-        f"Inkscape: {reload_msg}"
+        f"Inkscape: {reload_msg}\n\n"
+        f"Usa render_preview() para verificar visualmente el cambio."
+    )
+
+
+@mcp.tool()
+def validate_figure(svg_path: str = None) -> str:
+    """Valida la sintaxis y estructura del SVG de la figura actual.
+
+    Detecta errores de XML, elementos sin id semántico, ausencia de viewBox,
+    y otros problemas que podrían causar que la figura no se vea bien en
+    Inkscape o en la publicación final.
+
+    Args:
+        svg_path: SVG a validar (usa la figura actual si se omite)
+
+    Returns:
+        Reporte de validación con errores y advertencias
+    """
+    target = svg_path or _session.get("current_svg")
+    if not target:
+        return "No hay ninguna figura abierta. Usa create_figure() primero."
+
+    content = Path(target).read_text(encoding="utf-8")
+    report = validate_svg_detailed(content)
+    return f"Validación de: {target}\n\n{report}"
+
+
+@mcp.tool()
+def optimize_figure(svg_path: str = None) -> str:
+    """Optimiza el SVG para entrega en revista científica.
+
+    Usa Scour para limpiar el SVG: elimina metadatos innecesarios, comentarios,
+    definiciones sin usar y simplifica el código. Reduce el tamaño del archivo
+    sin cambiar el aspecto visual. Ideal antes de entregar la figura final.
+
+    Args:
+        svg_path: SVG a optimizar (usa la figura actual si se omite)
+
+    Returns:
+        Reporte de optimización con reducción de tamaño
+    """
+    target = svg_path or _session.get("current_svg")
+    if not target:
+        return "No hay ninguna figura abierta. Usa create_figure() primero."
+
+    content = Path(target).read_text(encoding="utf-8")
+
+    try:
+        optimized, original_bytes, new_bytes = optimize_svg(content)
+    except ImportError:
+        return (
+            "Scour no está instalado. Ejecuta:\n"
+            "  pip install scour\n"
+            "y vuelve a intentarlo."
+        )
+
+    Path(target).write_text(optimized, encoding="utf-8")
+    reduction = round((1 - new_bytes / original_bytes) * 100, 1)
+
+    return (
+        f"SVG optimizado.\n"
+        f"Tamaño original: {original_bytes:,} bytes\n"
+        f"Tamaño nuevo:    {new_bytes:,} bytes\n"
+        f"Reducción:       {reduction}%\n"
+        f"Archivo:         {target}"
     )
 
 
@@ -260,17 +384,19 @@ def export_figure(
     output_path: str = None,
     svg_path: str = None,
 ) -> str:
-    """Exporta la figura actual a PDF, PNG o SVG para incluir en el artículo.
+    """Exporta la figura a PDF, PNG o SVG para incluir en el artículo.
+
+    Se recomienda optimizar con optimize_figure() antes de exportar.
 
     Args:
-        format: Formato de salida — 'pdf', 'png' o 'svg' (por defecto: 'pdf')
-        output_path: Dónde guardar el archivo (por defecto: misma carpeta que el SVG)
+        format: 'pdf', 'png', 'svg' o 'eps' (por defecto: 'pdf')
+        output_path: Dónde guardar (por defecto: misma carpeta que el SVG)
         svg_path: SVG a exportar (usa la figura actual si se omite)
 
     Returns:
         Ruta al archivo exportado
     """
-    target = svg_path or _session["current_svg"]
+    target = svg_path or _session.get("current_svg")
     if not target:
         return "No hay ninguna figura abierta. Usa create_figure() primero."
 
@@ -282,18 +408,18 @@ def export_figure(
 
 @mcp.tool()
 def describe_figure(svg_path: str = None) -> str:
-    """Describe los elementos de la figura actual con sus IDs.
+    """Describe los elementos de la figura con sus IDs.
 
-    Útil para conocer qué elementos existen antes de solicitar ediciones
-    específicas. Los IDs mostrados pueden usarse en instrucciones de edición.
+    Útil para conocer qué elementos existen antes de pedir ediciones.
+    Los IDs listados pueden usarse en instrucciones de edit_figure().
 
     Args:
         svg_path: SVG a describir (usa la figura actual si se omite)
 
     Returns:
-        Lista de elementos con sus IDs y tipo
+        Lista de elementos con IDs y descripción
     """
-    target = svg_path or _session["current_svg"]
+    target = svg_path or _session.get("current_svg")
     if not target:
         return "No hay ninguna figura abierta. Usa create_figure() primero."
 
@@ -303,7 +429,7 @@ def describe_figure(svg_path: str = None) -> str:
     if not elements:
         return "No se pudieron analizar los elementos de la figura."
 
-    lines = [f"Figura: {target}", f"Elementos encontrados ({len(elements)}):", ""]
+    lines = [f"Figura: {target}", f"Elementos con id ({len(elements)}):", ""]
     for e in elements:
         indent = "  " * min(e["depth"], 3)
         lines.append(f"{indent}• <{e['tag']}> id=\"{e['id']}\" — {e['description']}")

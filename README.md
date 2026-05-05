@@ -44,8 +44,9 @@ En el chat, el SVG vive en el historial de mensajes. Si empiezas una nueva conve
 | Historial de chat | Se llena con código SVG | Solo contiene instrucciones y confirmaciones |
 | Persistencia entre sesiones | Ninguna | El archivo queda en disco |
 | Exportar a PDF/PNG | Manual desde Inkscape | Un comando desde el chat |
+| Claude "ve" el resultado | Solo si tú le pegas una captura | Sí: `render_preview()` entrega el PNG renderizado directamente a Claude |
 
-En síntesis: pedirle a Claude un SVG en el chat es como pedirle a alguien que te dicte el código de tu figura por teléfono. El MCP es como tener a esa persona sentada frente a la computadora, con acceso a tus archivos y a Inkscape, haciendo los cambios directamente mientras tú observas.
+En síntesis: pedirle a Claude un SVG en el chat es como pedirle a alguien que te dicte el código de tu figura por teléfono. El MCP es como tener a esa persona sentada frente a la computadora, con acceso a tus archivos y a Inkscape, haciendo los cambios directamente mientras tú observas — y además puede abrir sus propios ojos para verificar que el resultado se ve bien.
 
 ---
 
@@ -54,8 +55,11 @@ En síntesis: pedirle a Claude un SVG en el chat es como pedirle a alguien que t
 | Herramienta | Descripción |
 |---|---|
 | `create_figure` | Toma una foto de un boceto + el pie de figura y genera un SVG estilo IEEE |
+| `render_preview` | Renderiza el SVG a PNG para que Claude pueda verlo visualmente y detectar problemas |
 | `edit_figure` | Modifica la figura con instrucciones en español o inglés |
-| `export_figure` | Exporta a PDF, PNG o SVG para incluir en el artículo |
+| `validate_figure` | Verifica la sintaxis XML y la estructura semántica del SVG |
+| `optimize_figure` | Limpia el SVG con Scour para reducir su tamaño antes de entregar |
+| `export_figure` | Exporta a PDF, PNG, SVG o EPS para incluir en el artículo |
 | `describe_figure` | Lista los elementos de la figura con sus IDs para facilitar ediciones |
 
 **Tipos de figura soportados:** diagramas de bloques, diagramas de flujo, grafos.
@@ -143,6 +147,12 @@ El pie de figura es: "Arquitectura del sistema de clasificación propuesto"
 Usa create_figure para generar la figura.
 ```
 
+### Verificar visualmente el resultado (Claude lo ve y comenta)
+
+```
+Muéstrame cómo quedó la figura con render_preview
+```
+
 ### Editar la figura
 
 ```
@@ -157,16 +167,22 @@ Añade una flecha de retroalimentación desde el bloque de salida al bloque de e
 Agrega un nuevo bloque llamado "Normalización" entre la entrada y el clasificador
 ```
 
+### Validar antes de entregar
+
+```
+Valida la figura actual
+```
+
+### Optimizar y exportar
+
+```
+Optimiza la figura y luego expórtala a PDF
+```
+
 ### Ver los elementos de la figura
 
 ```
 Describe los elementos de la figura actual
-```
-
-### Exportar para el artículo
-
-```
-Exporta la figura a PDF para incluirla en el artículo
 ```
 
 ---
@@ -178,9 +194,30 @@ Exporta la figura a PDF para incluirla en el artículo
 2. Toma una foto o captura de pantalla del boceto
 3. En VS Code, le pide a Claude que genere la figura con create_figure()
 4. Inkscape se abre automáticamente con el SVG generado
-5. El tesista revisa y pide ajustes con edit_figure() en lenguaje natural
-6. Cuando está satisfecho, exporta con export_figure() a PDF/PNG
+5. Claude llama a render_preview() y VE el resultado visualmente
+6. Si hay problemas, Claude los detecta y sugiere correcciones con edit_figure()
+7. El tesista itera con instrucciones en lenguaje natural hasta quedar conforme
+8. Antes de entregar, optimize_figure() limpia el SVG
+9. export_figure() genera el PDF/PNG listo para el artículo
 ```
+
+---
+
+## Lo que se incorporó de SVG-MCP
+
+Este proyecto integra ideas del [SVG-MCP de adamryczkowski](https://github.com/adamryczkowski/SVG-MCP),
+adaptadas para el caso de uso de figuras científicas:
+
+| Idea de SVG-MCP | Cómo se adaptó en MCP Draw |
+|---|---|
+| `svg_render` → PNG para visión | `render_preview()`: renderiza con Inkscape (mayor fidelidad que CairoSVG) y devuelve la imagen directamente a Claude para inspección |
+| `svg_validate` con reporte de errores | `validate_figure()`: valida XML + verifica estructura semántica (viewBox, ids de bloques/flechas, marcadores) |
+| `svg_optimize` vía Scour | `optimize_figure()`: usa Scour con opciones ajustadas para preservar ids semánticos que usa edit_figure() |
+| `svg_diff` (comparación visual) | Pendiente para versión futura |
+
+La diferencia principal es que SVG-MCP es un validador/renderizador genérico, mientras que MCP Draw
+está especializado en figuras científicas: genera desde bocetos con visión, mantiene estilo IEEE,
+usa ids semánticos para edición precisa, y controla Inkscape para el flujo editorial completo.
 
 ---
 
