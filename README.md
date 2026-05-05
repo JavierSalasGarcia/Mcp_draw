@@ -54,9 +54,12 @@ En síntesis: pedirle a Claude un SVG en el chat es como pedirle a alguien que t
 
 | Herramienta | Descripción |
 |---|---|
-| `create_figure` | Toma una foto de un boceto + el pie de figura y genera un SVG estilo IEEE |
+| `create_figure` | Toma foto de boceto + pie de figura → genera SVG estilo IEEE → guarda v1 automáticamente |
 | `render_preview` | Renderiza el SVG a PNG para que Claude pueda verlo visualmente y detectar problemas |
-| `edit_figure` | Modifica la figura con instrucciones en español o inglés |
+| `edit_figure` | Modifica la figura con instrucciones en español o inglés → guarda versión de respaldo antes de editar |
+| `list_versions` | Muestra el historial completo de versiones con timestamps y descripción de cada cambio |
+| `restore_version` | Restaura la figura a cualquier versión anterior (guarda el estado actual antes de restaurar) |
+| `diff_versions` | Compara dos versiones visualmente lado a lado en una imagen |
 | `validate_figure` | Verifica la sintaxis XML y la estructura semántica del SVG |
 | `optimize_figure` | Limpia el SVG con Scour para reducir su tamaño antes de entregar |
 | `export_figure` | Exporta a PDF, PNG, SVG o EPS para incluir en el artículo |
@@ -73,6 +76,15 @@ En síntesis: pedirle a Claude un SVG en el chat es como pedirle a alguien que t
 - [Inkscape 1.x](https://inkscape.org/release/) instalado en `C:\Program Files\Inkscape\`
 - [VS Code](https://code.visualstudio.com/) con la extensión [Claude Code](https://marketplace.visualstudio.com/items?itemName=Anthropic.claude-code)
 - API key de Anthropic ([obtener aquí](https://console.anthropic.com/))
+
+**Dependencias Python** (se instalan con `pip install -r requirements.txt`):
+
+| Paquete | Para qué se usa |
+|---|---|
+| `mcp` | Protocolo MCP (servidor) |
+| `anthropic` | API de Claude para visión y generación de SVG |
+| `scour` | Optimización del SVG antes de entregar |
+| `Pillow` | Imagen comparativa lado a lado en `diff_versions()` |
 
 ---
 
@@ -167,6 +179,32 @@ Añade una flecha de retroalimentación desde el bloque de salida al bloque de e
 Agrega un nuevo bloque llamado "Normalización" entre la entrada y el clasificador
 ```
 
+### Ver el historial de versiones
+
+```
+Muéstrame todas las versiones guardadas de la figura
+```
+
+### Comparar dos versiones (svg_diff)
+
+```
+Compara la versión 2 con la versión 5
+```
+
+```
+Muéstrame cómo quedó la figura antes y después del último cambio
+```
+
+### Volver a una versión anterior
+
+```
+La figura quedó rota, regresa a la versión 3
+```
+
+```
+Restaura la versión anterior de la figura
+```
+
 ### Validar antes de entregar
 
 ```
@@ -190,16 +228,37 @@ Describe los elementos de la figura actual
 ## Flujo de trabajo típico
 
 ```
-1. El tesista hace un boceto a mano (papel o tablet)
-2. Toma una foto o captura de pantalla del boceto
-3. En VS Code, le pide a Claude que genere la figura con create_figure()
-4. Inkscape se abre automáticamente con el SVG generado
-5. Claude llama a render_preview() y VE el resultado visualmente
-6. Si hay problemas, Claude los detecta y sugiere correcciones con edit_figure()
-7. El tesista itera con instrucciones en lenguaje natural hasta quedar conforme
-8. Antes de entregar, optimize_figure() limpia el SVG
-9. export_figure() genera el PDF/PNG listo para el artículo
+1.  El tesista hace un boceto a mano (papel o tablet)
+2.  Toma una foto o captura de pantalla del boceto
+3.  En VS Code, le pide a Claude que genere la figura con create_figure()
+     → Se guarda automáticamente como v1
+4.  Inkscape se abre automáticamente con el SVG generado
+5.  Claude llama a render_preview() y VE el resultado visualmente
+6.  Si hay problemas, Claude los detecta y corrige con edit_figure()
+     → Antes de cada edición se guarda una versión de respaldo automáticamente
+7.  El tesista puede ver el historial con list_versions()
+8.  Si un cambio rompe la figura, restore_version(N) la devuelve al estado anterior
+9.  Para comparar cómo estaba antes y después: diff_versions(N, M)
+10. Antes de entregar: optimize_figure() limpia el SVG
+11. export_figure() genera el PDF/PNG listo para el artículo
 ```
+
+### Dónde se guardan las versiones
+
+```
+~/mcp_draw_figures/
+├── figura_20241201_143022.svg          ← archivo activo
+├── figura_20241201_143022.preview.png  ← última vista previa
+└── .versions/
+    └── figura_20241201_143022/
+        ├── v001.svg  ← "Figura inicial generada desde boceto"
+        ├── v002.svg  ← "auto: Cambia el bloque clasificador a azul"
+        ├── v003.svg  ← "auto: Añade flecha de retroalimentación"
+        └── history.json
+```
+
+Las versiones nunca se borran automáticamente. Cada vez que se restaura una versión,
+el estado actual se guarda primero, por lo que ningún trabajo se pierde.
 
 ---
 
@@ -210,10 +269,10 @@ adaptadas para el caso de uso de figuras científicas:
 
 | Idea de SVG-MCP | Cómo se adaptó en MCP Draw |
 |---|---|
-| `svg_render` → PNG para visión | `render_preview()`: renderiza con Inkscape (mayor fidelidad que CairoSVG) y devuelve la imagen directamente a Claude para inspección |
-| `svg_validate` con reporte de errores | `validate_figure()`: valida XML + verifica estructura semántica (viewBox, ids de bloques/flechas, marcadores) |
-| `svg_optimize` vía Scour | `optimize_figure()`: usa Scour con opciones ajustadas para preservar ids semánticos que usa edit_figure() |
-| `svg_diff` (comparación visual) | Pendiente para versión futura |
+| `svg_render` → PNG para visión | `render_preview()`: renderiza con Inkscape y devuelve la imagen directamente a Claude para inspección |
+| `svg_validate` con reporte de errores | `validate_figure()`: valida XML + estructura semántica (viewBox, ids, marcadores) |
+| `svg_optimize` vía Scour | `optimize_figure()`: Scour con opciones que preservan los ids semánticos que usa edit_figure() |
+| `svg_diff` comparación visual | `diff_versions()`: compara cualquier par de versiones del historial, imagen lado a lado generada con Pillow |
 
 La diferencia principal es que SVG-MCP es un validador/renderizador genérico, mientras que MCP Draw
 está especializado en figuras científicas: genera desde bocetos con visión, mantiene estilo IEEE,

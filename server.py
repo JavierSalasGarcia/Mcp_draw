@@ -5,6 +5,7 @@ Para editores y tesistas de ingeniería: convierte bocetos en figuras
 IEEE-style editables en Inkscape mediante instrucciones en lenguaje natural.
 """
 
+import io
 import os
 import base64
 import mimetypes
@@ -15,6 +16,7 @@ import anthropic
 from mcp.server.fastmcp import FastMCP, Image
 
 from inkscape_controller import InkscapeController
+from version_manager import VersionManager
 from svg_utils import (
     clean_svg_response,
     extract_svg_elements,
@@ -38,8 +40,9 @@ mcp = FastMCP(
 _output_dir = Path.home() / "mcp_draw_figures"
 _output_dir.mkdir(exist_ok=True)
 
-_session = {
+_session: dict = {
     "current_svg": None,
+    "caption": "",
     "inkscape": InkscapeController(),
 }
 
@@ -72,7 +75,7 @@ ESTRUCTURA SVG:
 • Define flechas reutilizables con <defs><marker>
 
 ESTILO (IEEE Publication Style):
-• Fuente:               font-family="Arial, Helvetica, sans-serif"
+• Fuente:                font-family="Arial, Helvetica, sans-serif"
 • Bloques rectangulares: fill="#EBF4FA" stroke="#2C5F8A" stroke-width="1.5"
 • Bloques proceso:       fill="#F5F5F5" stroke="#333333" stroke-width="1.5"
 • Rombos de decisión:    fill="#FFF9E6" stroke="#8B6914" stroke-width="1.5"
@@ -111,19 +114,6 @@ REGLAS:
 SVG modificado:
 """
 
-_PROMPT_VERIFICAR = """\
-Acabas de generar o editar esta figura SVG. Obsérvala visualmente y evalúa:
-
-1. ¿Los elementos están bien posicionados y no se superponen?
-2. ¿Las flechas conectan correctamente los bloques/nodos?
-3. ¿El texto es legible y está centrado dentro de sus elementos?
-4. ¿El estilo es consistente y apropiado para una publicación científica?
-5. ¿La figura refleja fielmente lo que describe el pie: "{caption}"?
-
-Si detectas algún problema, descríbelo con precisión para poder corregirlo \
-con edit_figure(). Si todo se ve bien, confírmalo brevemente.
-"""
-
 
 # ── utilidades internas ───────────────────────────────────────────────────────
 
@@ -151,6 +141,70 @@ def _svg_path(name: str) -> Path:
     return _output_dir / f"{name}_{ts}.svg"
 
 
+def _vm(target: str) -> VersionManager:
+    return VersionManager(target)
+
+
+def _render_to_tmp(version_path: Path, suffix: str, width: int) -> Path:
+    """Renderiza un SVG a un PNG temporal y retorna su Path."""
+    out = version_path.parent / f"_diff_{suffix}.png"
+    err = render_svg_to_png(
+        str(version_path), str(out), width, _session["inkscape"]._exe
+    )
+    if err:
+        raise RuntimeError(f"Error al renderizar {version_path.name}: {err}")
+    return out
+
+
+def _side_by_side_image(
+    png_a: Path,
+    png_b: Path,
+    label_a: str,
+    label_b: str,
+) -> bytes:
+    """Crea una imagen de comparación lado a lado con Pillow."""
+    from PIL import Image as PILImage, ImageDraw, ImageFont
+
+    img_a = PILImage.open(png_a).convert("RGB")
+    img_b = PILImage.open(png_b).convert("RGB")
+
+    # Altura uniforme (la mayor)
+    h = max(img_a.height, img_b.height)
+    if img_a.height < h:
+        bg = PILImage.new("RGB", (img_a.width, h), (255, 255, 255))
+        bg.paste(img_a, (0, 0))
+        img_a = bg
+    if img_b.height < h:
+        bg = PILImage.new("RGB", (img_b.width, h), (255, 255, 255))
+        bg.paste(img_b, (0, 0))
+        img_b = bg
+
+    GAP = 8
+    LABEL_H = 36
+    total_w = img_a.width + GAP + img_b.width
+    canvas = PILImage.new("RGB", (total_w, h + LABEL_H), (220, 220, 220))
+    draw = ImageDraw.Draw(canvas)
+
+    # Etiquetas de color
+    draw.rectangle([0, 0, img_a.width, LABEL_H], fill=(52, 120, 190))
+    draw.rectangle([img_a.width + GAP, 0, total_w, LABEL_H], fill=(46, 160, 95))
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 14)
+    except (IOError, OSError):
+        font = ImageFont.load_default()
+
+    draw.text((10, 10), label_a[:55], fill="white", font=font)
+    draw.text((img_a.width + GAP + 10, 10), label_b[:55], fill="white", font=font)
+
+    canvas.paste(img_a, (0, LABEL_H))
+    canvas.paste(img_b, (img_a.width + GAP, LABEL_H))
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 # ── herramientas MCP ──────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -162,7 +216,7 @@ def create_figure(
     """Crea una figura vectorial profesional a partir de un boceto.
 
     Analiza la imagen del boceto junto con el pie de figura para generar
-    un SVG limpio estilo IEEE, listo para editar en Inkscape.
+    un SVG limpio estilo IEEE. Guarda automáticamente la versión inicial (v1).
 
     Args:
         sketch_path: Ruta completa a la imagen del boceto (JPG, PNG)
@@ -170,7 +224,7 @@ def create_figure(
         figure_type: 'block_diagram', 'flowchart', 'graph' o 'auto' (por defecto)
 
     Returns:
-        Ruta al SVG generado. Usa render_preview() para verificar el resultado visualmente.
+        Ruta al SVG generado. Usa render_preview() para verificar visualmente.
     """
     image_data, media_type = _encode_image(sketch_path)
     client = _client()
@@ -208,14 +262,17 @@ def create_figure(
     _session["current_svg"] = str(out)
     _session["caption"] = caption
 
+    # Versión inicial
+    vm = _vm(str(out))
+    v_num = vm.save("Figura inicial generada desde boceto")
+
     inkscape_msg = _session["inkscape"].open_file(str(out))
 
     return (
-        f"Figura creada.\n"
+        f"Figura creada — versión {v_num} guardada.\n"
         f"SVG: {out}\n"
         f"Inkscape: {inkscape_msg}\n\n"
-        f"Usa render_preview() para que pueda ver cómo quedó y verificar que "
-        f"el resultado es correcto antes de hacer ajustes."
+        f"Usa render_preview() para verificar el resultado visualmente."
     )
 
 
@@ -223,9 +280,9 @@ def create_figure(
 def render_preview(svg_path: str = None, width: int = 900) -> Image:
     """Renderiza la figura a PNG para inspección visual.
 
-    Permite a Claude ver cómo se ve realmente la figura generada o editada,
-    cerrando el ciclo de retroalimentación visual. Úsalo después de
-    create_figure() o edit_figure() para verificar el resultado.
+    Permite a Claude ver cómo se ve realmente la figura y detectar
+    problemas (superposición de elementos, flechas mal conectadas, etc.)
+    antes de solicitar correcciones.
 
     Args:
         svg_path: SVG a renderizar (usa la figura actual si se omite)
@@ -236,9 +293,7 @@ def render_preview(svg_path: str = None, width: int = 900) -> Image:
     """
     target = svg_path or _session.get("current_svg")
     if not target:
-        raise ValueError(
-            "No hay ninguna figura abierta. Usa create_figure() primero."
-        )
+        raise ValueError("No hay ninguna figura abierta. Usa create_figure() primero.")
 
     preview_path = str(Path(target).with_suffix(".preview.png"))
     error = render_svg_to_png(
@@ -251,7 +306,7 @@ def render_preview(svg_path: str = None, width: int = 900) -> Image:
     if error:
         raise RuntimeError(
             f"No se pudo renderizar la figura: {error}\n"
-            f"Verifica que Inkscape esté instalado correctamente."
+            "Verifica que Inkscape esté instalado correctamente."
         )
 
     return Image(data=Path(preview_path).read_bytes(), format="png")
@@ -261,8 +316,8 @@ def render_preview(svg_path: str = None, width: int = 900) -> Image:
 def edit_figure(instruction: str, svg_path: str = None) -> str:
     """Edita la figura actual con una instrucción en lenguaje natural.
 
-    Después de editar, usa render_preview() para verificar visualmente que
-    el cambio quedó como se esperaba.
+    Guarda automáticamente una versión de respaldo antes de aplicar
+    el cambio. Si el resultado no es el esperado, usa restore_version().
 
     Ejemplos:
     - "Cambia el color del bloque clasificador a azul oscuro"
@@ -275,14 +330,15 @@ def edit_figure(instruction: str, svg_path: str = None) -> str:
         svg_path: SVG a editar (usa la figura actual si se omite)
 
     Returns:
-        Confirmación del cambio. Sigue con render_preview() para verificar.
+        Confirmación con número de versión de respaldo creado.
     """
     target = svg_path or _session.get("current_svg")
     if not target:
-        return (
-            "No hay ninguna figura abierta. "
-            "Usa create_figure() primero."
-        )
+        return "No hay ninguna figura abierta. Usa create_figure() primero."
+
+    # Guardar versión antes de editar
+    vm = _vm(target)
+    backup_num = vm.save(f"auto: {instruction[:80]}")
 
     current_svg = Path(target).read_text(encoding="utf-8")
     client = _client()
@@ -308,10 +364,164 @@ def edit_figure(instruction: str, svg_path: str = None) -> str:
     reload_msg = _session["inkscape"].reload_file(target)
 
     return (
-        f"Figura actualizada.\n"
+        f"Figura actualizada — respaldo guardado como v{backup_num}.\n"
         f"Inkscape: {reload_msg}\n\n"
-        f"Usa render_preview() para verificar visualmente el cambio."
+        f"Usa render_preview() para verificar el cambio.\n"
+        f"Si algo salió mal, usa restore_version({backup_num}) para volver atrás."
     )
+
+
+@mcp.tool()
+def list_versions(svg_path: str = None) -> str:
+    """Lista todas las versiones guardadas de la figura actual.
+
+    Muestra número de versión, fecha/hora, y descripción del cambio
+    que originó cada versión. Útil para saber a qué versión volver
+    si la figura actual tiene problemas.
+
+    Args:
+        svg_path: SVG a consultar (usa la figura actual si se omite)
+
+    Returns:
+        Historial de versiones con timestamps y comentarios
+    """
+    target = svg_path or _session.get("current_svg")
+    if not target:
+        return "No hay ninguna figura abierta. Usa create_figure() primero."
+
+    vm = _vm(target)
+    history = vm.list()
+
+    if not history:
+        return "Esta figura no tiene versiones guardadas aún."
+
+    lines = [
+        f"Historial de versiones: {Path(target).name}",
+        f"Total: {len(history)} versión(es)",
+        "",
+    ]
+    for entry in history:
+        size_kb = entry.get("size_bytes", 0) / 1024
+        lines.append(
+            f"  v{entry['version']:03d} | {entry['timestamp']} | "
+            f"{size_kb:5.1f} KB | {entry['comment']}"
+        )
+
+    lines += [
+        "",
+        "Para restaurar una versión: restore_version(<número>)",
+        "Para comparar dos versiones: diff_versions(<v_anterior>, <v_actual>)",
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def restore_version(version_number: int, svg_path: str = None) -> str:
+    """Restaura la figura a una versión anterior.
+
+    Guarda el estado actual como nueva versión antes de restaurar,
+    por lo que ningún trabajo se pierde. Tras restaurar, Inkscape
+    se recarga automáticamente con la versión anterior.
+
+    Args:
+        version_number: Número de versión a la que volver (ver list_versions())
+        svg_path: SVG a restaurar (usa la figura actual si se omite)
+
+    Returns:
+        Confirmación de la restauración con números de versión
+    """
+    target = svg_path or _session.get("current_svg")
+    if not target:
+        return "No hay ninguna figura abierta. Usa create_figure() primero."
+
+    vm = _vm(target)
+
+    try:
+        info = vm.restore(version_number)
+    except (ValueError, FileNotFoundError) as e:
+        return f"No se pudo restaurar: {e}"
+
+    reload_msg = _session["inkscape"].reload_file(target)
+
+    return (
+        f"Figura restaurada a v{info['restored_version']}.\n"
+        f"  Versión restaurada: v{info['restored_version']} "
+        f"({info['original_timestamp']}) — {info['original_comment']}\n"
+        f"  Estado anterior guardado como: v{info['backup_version']}\n"
+        f"  Versión actual: v{info['new_version']}\n"
+        f"Inkscape: {reload_msg}"
+    )
+
+
+@mcp.tool()
+def diff_versions(
+    version_a: int = None,
+    version_b: int = None,
+    svg_path: str = None,
+) -> Image:
+    """Compara visualmente dos versiones de la figura lado a lado.
+
+    Renderiza ambas versiones y las presenta en una imagen comparativa
+    con etiquetas de color. Útil para verificar qué cambió entre ediciones
+    o para decidir cuál versión conservar.
+
+    Args:
+        version_a: Primera versión (por defecto: la penúltima)
+        version_b: Segunda versión (por defecto: la última)
+        svg_path: SVG a comparar (usa la figura actual si se omite)
+
+    Returns:
+        Imagen PNG con las dos versiones lado a lado
+    """
+    target = svg_path or _session.get("current_svg")
+    if not target:
+        raise ValueError("No hay ninguna figura abierta. Usa create_figure() primero.")
+
+    vm = _vm(target)
+    history = vm.list()
+
+    if len(history) < 2:
+        raise ValueError(
+            f"Se necesitan al menos 2 versiones para comparar. "
+            f"Hay {len(history)} versión(es) guardada(s)."
+        )
+
+    # Defaults: penúltima vs última
+    if version_b is None:
+        version_b = len(history)
+    if version_a is None:
+        version_a = max(1, version_b - 1)
+
+    path_a = vm.get_path(version_a)
+    path_b = vm.get_path(version_b)
+
+    # Renderizar ambas versiones
+    try:
+        png_a = _render_to_tmp(path_a, f"v{version_a:03d}", width=700)
+        png_b = _render_to_tmp(path_b, f"v{version_b:03d}", width=700)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"{e}\nVerifica que Inkscape esté instalado correctamente."
+        ) from e
+
+    # Etiquetas para la comparación
+    info_a = history[version_a - 1]
+    info_b = history[version_b - 1]
+    label_a = f"v{version_a} | {info_a['timestamp'][11:16]} — {info_a['comment']}"
+    label_b = f"v{version_b} | {info_b['timestamp'][11:16]} — {info_b['comment']}"
+
+    try:
+        png_bytes = _side_by_side_image(png_a, png_b, label_a, label_b)
+    except ImportError:
+        raise RuntimeError(
+            "Pillow no está instalado. Ejecuta: pip install Pillow\n"
+            "y vuelve a intentarlo."
+        )
+    finally:
+        png_a.unlink(missing_ok=True)
+        png_b.unlink(missing_ok=True)
+
+    return Image(data=png_bytes, format="png")
 
 
 @mcp.tool()
@@ -319,8 +529,7 @@ def validate_figure(svg_path: str = None) -> str:
     """Valida la sintaxis y estructura del SVG de la figura actual.
 
     Detecta errores de XML, elementos sin id semántico, ausencia de viewBox,
-    y otros problemas que podrían causar que la figura no se vea bien en
-    Inkscape o en la publicación final.
+    y otros problemas que podrían causar que la figura no se vea bien.
 
     Args:
         svg_path: SVG a validar (usa la figura actual si se omite)
@@ -341,9 +550,9 @@ def validate_figure(svg_path: str = None) -> str:
 def optimize_figure(svg_path: str = None) -> str:
     """Optimiza el SVG para entrega en revista científica.
 
-    Usa Scour para limpiar el SVG: elimina metadatos innecesarios, comentarios,
-    definiciones sin usar y simplifica el código. Reduce el tamaño del archivo
-    sin cambiar el aspecto visual. Ideal antes de entregar la figura final.
+    Usa Scour para limpiar el SVG: elimina metadatos innecesarios,
+    comentarios y definiciones sin usar. Guarda una versión de respaldo
+    antes de optimizar.
 
     Args:
         svg_path: SVG a optimizar (usa la figura actual si se omite)
@@ -354,6 +563,10 @@ def optimize_figure(svg_path: str = None) -> str:
     target = svg_path or _session.get("current_svg")
     if not target:
         return "No hay ninguna figura abierta. Usa create_figure() primero."
+
+    # Versión de respaldo antes de optimizar
+    vm = _vm(target)
+    backup_num = vm.save("Pre-optimización")
 
     content = Path(target).read_text(encoding="utf-8")
 
@@ -370,7 +583,7 @@ def optimize_figure(svg_path: str = None) -> str:
     reduction = round((1 - new_bytes / original_bytes) * 100, 1)
 
     return (
-        f"SVG optimizado.\n"
+        f"SVG optimizado — respaldo guardado como v{backup_num}.\n"
         f"Tamaño original: {original_bytes:,} bytes\n"
         f"Tamaño nuevo:    {new_bytes:,} bytes\n"
         f"Reducción:       {reduction}%\n"
@@ -384,9 +597,9 @@ def export_figure(
     output_path: str = None,
     svg_path: str = None,
 ) -> str:
-    """Exporta la figura a PDF, PNG o SVG para incluir en el artículo.
+    """Exporta la figura a PDF, PNG, SVG o EPS para incluir en el artículo.
 
-    Se recomienda optimizar con optimize_figure() antes de exportar.
+    Se recomienda optimize_figure() antes de exportar.
 
     Args:
         format: 'pdf', 'png', 'svg' o 'eps' (por defecto: 'pdf')
