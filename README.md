@@ -60,6 +60,8 @@ En síntesis: pedirle a Claude un SVG en el chat es como pedirle a alguien que t
 | `list_versions` | Muestra el historial completo de versiones con timestamps y descripción de cada cambio |
 | `restore_version` | Restaura la figura a cualquier versión anterior (guarda el estado actual antes de restaurar) |
 | `diff_versions` | Compara dos versiones visualmente lado a lado en una imagen |
+| `gallery_versions` | Muestra todas las versiones como galería de miniaturas en una sola imagen |
+| `merge_versions` | Combina características de dos versiones según instrucción en lenguaje natural |
 | `validate_figure` | Verifica la sintaxis XML y la estructura semántica del SVG |
 | `optimize_figure` | Limpia el SVG con Scour para reducir su tamaño antes de entregar |
 | `export_figure` | Exporta a PDF, PNG, SVG o EPS para incluir en el artículo |
@@ -205,6 +207,30 @@ La figura quedó rota, regresa a la versión 3
 Restaura la versión anterior de la figura
 ```
 
+### Ver la galería de todas las versiones
+
+```
+Muéstrame la galería de versiones
+```
+
+### Mezclar características de dos versiones
+
+```
+Usa la estructura de la versión 3 pero los colores de la versión 5
+```
+
+```
+merge_versions(2, 6, "conserva las flechas y conectores de la v2, pero aplica la paleta de colores de la v6")
+```
+
+```
+Toma el layout de la v1 pero usa las etiquetas y texto de la v4
+```
+
+> El estudiante primero ve la galería para identificar qué versiones tiene,
+> luego pide la mezcla que prefiere. Claude lee ambos SVGs y produce
+> una versión híbrida que se guarda automáticamente en el historial.
+
 ### Validar antes de entregar
 
 ```
@@ -257,8 +283,24 @@ Describe los elementos de la figura actual
         └── history.json
 ```
 
-Las versiones nunca se borran automáticamente. Cada vez que se restaura una versión,
-el estado actual se guarda primero, por lo que ningún trabajo se pierde.
+Las versiones nunca se borran automáticamente. Cada vez que se restaura una versión
+o se aplica una mezcla, el estado actual se guarda primero — ningún trabajo se pierde.
+
+### Flujo de trabajo con galería y mezcla
+
+```
+gallery_versions()           → ver todas las versiones en una imagen
+       ↓
+diff_versions(3, 5)          → comparar dos candidatas lado a lado
+       ↓
+merge_versions(3, 5,         → crear versión híbrida
+  "estructura de v3,
+   colores de v5")
+       ↓
+render_preview()             → Claude verifica que la mezcla quedó bien
+       ↓
+optimize_figure()  →  export_figure()
+```
 
 ---
 

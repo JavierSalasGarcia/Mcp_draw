@@ -114,6 +114,40 @@ REGLAS:
 SVG modificado:
 """
 
+_PROMPT_MEZCLAR = """\
+Eres un experto en SVG científico. Vas a combinar características de dos versiones
+de la misma figura para crear una versión híbrida de calidad profesional.
+
+━━━ Versión A (v{version_a} — {comment_a}) ━━━
+{svg_a}
+
+━━━ Versión B (v{version_b} — {comment_b}) ━━━
+{svg_b}
+
+━━━ Instrucción de combinación ━━━
+{instruction}
+
+GUÍA DE ASPECTOS SVG:
+• "estructura" / "posiciones" / "layout"  → coordenadas x/y, width/height, relaciones entre elementos
+• "colores" / "estilos" / "paleta"        → fill, stroke, stroke-width, opacity
+• "texto" / "etiquetas" / "contenido"     → texto dentro de <text>, valores de labels
+• "flechas" / "conectores"               → paths de flechas, markers, trayectorias
+• "formas" / "bloques"                   → geometría de rect, circle, polygon, path de contornos
+• "tipografía"                           → font-family, font-size, font-weight
+
+REGLAS:
+1. Devuelve ÚNICAMENTE el SVG combinado completo — sin markdown ni explicaciones
+2. Usa los ids semánticos para identificar elementos equivalentes entre versiones
+   (block-clasificador en v_a corresponde a block-clasificador en v_b)
+3. Conserva todos los ids de los elementos resultantes
+4. Mantén el viewBox de la versión cuyos elementos de estructura uses
+5. El resultado debe ser visualmente coherente y de calidad publicable
+6. Si un elemento existe en una versión pero no en la otra, inclúyelo con
+   los atributos de la versión que lo tenga
+
+SVG combinado:
+"""
+
 
 # ── utilidades internas ───────────────────────────────────────────────────────
 
@@ -154,6 +188,75 @@ def _render_to_tmp(version_path: Path, suffix: str, width: int) -> Path:
     if err:
         raise RuntimeError(f"Error al renderizar {version_path.name}: {err}")
     return out
+
+
+def _create_gallery_image(
+    cells: list[tuple],  # list of (PILImage, entry_dict)
+    columns: int,
+) -> bytes:
+    """Crea una hoja de contactos con todas las versiones como miniaturas."""
+    from PIL import Image as PILImage, ImageDraw, ImageFont
+
+    if not cells:
+        raise ValueError("No hay versiones para mostrar.")
+
+    THUMB_W = cells[0][0].width
+    THUMB_H = cells[0][0].height
+    LABEL_H = 46
+    GAP = 10
+    PAD = 16
+    TITLE_H = 38
+
+    rows = (len(cells) + columns - 1) // columns
+    total_w = columns * THUMB_W + (columns - 1) * GAP + 2 * PAD
+    total_h = TITLE_H + rows * (THUMB_H + LABEL_H) + (rows - 1) * GAP + PAD
+
+    canvas = PILImage.new("RGB", (total_w, total_h), (240, 240, 240))
+    draw = ImageDraw.Draw(canvas)
+
+    try:
+        font_title = ImageFont.truetype("arial.ttf", 16)
+        font_label = ImageFont.truetype("arial.ttf", 12)
+        font_small = ImageFont.truetype("arial.ttf", 11)
+    except (IOError, OSError):
+        font_title = font_label = font_small = ImageFont.load_default()
+
+    draw.text(
+        (PAD, 10),
+        f"Galería de versiones — {len(cells)} versión(es)",
+        fill=(50, 50, 50),
+        font=font_title,
+    )
+
+    for i, (img, entry) in enumerate(cells):
+        col = i % columns
+        row = i // columns
+        x = PAD + col * (THUMB_W + GAP)
+        y = TITLE_H + row * (THUMB_H + LABEL_H + GAP)
+
+        # Marco blanco + thumbnail
+        draw.rectangle([x - 1, y - 1, x + THUMB_W + 1, y + THUMB_H + 1],
+                       fill="white", outline=(190, 190, 190))
+        canvas.paste(img.convert("RGB"), (x, y))
+
+        # Franja de etiqueta debajo
+        label_y = y + THUMB_H
+        draw.rectangle([x - 1, label_y, x + THUMB_W + 1, label_y + LABEL_H],
+                       fill=(60, 100, 160))
+
+        v_num = entry["version"]
+        ts = entry["timestamp"][5:16].replace("T", " ")  # MM-DD HH:MM
+        comment = entry["comment"]
+
+        draw.text((x + 5, label_y + 4), f"v{v_num:03d}  {ts}", fill="white", font=font_label)
+        # Truncar comentario para que quepa
+        max_chars = (THUMB_W - 10) // 7
+        short = comment if len(comment) <= max_chars else comment[:max_chars - 1] + "…"
+        draw.text((x + 5, label_y + 22), short, fill=(200, 220, 255), font=font_small)
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _side_by_side_image(
@@ -522,6 +625,168 @@ def diff_versions(
         png_b.unlink(missing_ok=True)
 
     return Image(data=png_bytes, format="png")
+
+
+@mcp.tool()
+def gallery_versions(
+    svg_path: str = None,
+    columns: int = 3,
+    thumb_width: int = 380,
+) -> Image:
+    """Muestra todas las versiones guardadas como galería de miniaturas.
+
+    Renderiza cada versión en pequeño y las organiza en una cuadrícula
+    con número, fecha y descripción del cambio. Útil para elegir qué
+    versiones combinar con merge_versions().
+
+    Args:
+        svg_path: SVG a consultar (usa la figura actual si se omite)
+        columns: Número de columnas en la galería (por defecto 3)
+        thumb_width: Ancho de cada miniatura en píxeles (por defecto 380)
+
+    Returns:
+        Imagen PNG con la galería completa de versiones
+    """
+    from PIL import Image as PILImage
+
+    target = svg_path or _session.get("current_svg")
+    if not target:
+        raise ValueError("No hay ninguna figura abierta. Usa create_figure() primero.")
+
+    vm = _vm(target)
+    history = vm.list()
+
+    if not history:
+        raise ValueError("Esta figura no tiene versiones guardadas aún.")
+
+    tmp_dir = Path(target).parent
+    cells: list[tuple] = []
+    errors: list[str] = []
+
+    for entry in history:
+        v_num = entry["version"]
+        try:
+            v_path = vm.get_path(v_num)
+            png_path = tmp_dir / f".gallery_v{v_num:03d}.png"
+            err = render_svg_to_png(
+                str(v_path), str(png_path), thumb_width, _session["inkscape"]._exe
+            )
+            if err:
+                errors.append(f"v{v_num}: {err}")
+                continue
+            cells.append((PILImage.open(png_path), entry))
+        except Exception as e:
+            errors.append(f"v{v_num}: {e}")
+
+    if not cells:
+        raise RuntimeError(
+            f"No se pudo renderizar ninguna versión.\n"
+            + "\n".join(errors)
+            + "\nVerifica que Inkscape esté instalado."
+        )
+
+    try:
+        png_bytes = _create_gallery_image(cells, columns)
+    except ImportError:
+        raise RuntimeError("Pillow no está instalado. Ejecuta: pip install Pillow")
+    finally:
+        for _, entry in cells:
+            tmp = tmp_dir / f".gallery_v{entry['version']:03d}.png"
+            tmp.unlink(missing_ok=True)
+
+    return Image(data=png_bytes, format="png")
+
+
+@mcp.tool()
+def merge_versions(
+    version_a: int,
+    version_b: int,
+    instruction: str,
+    svg_path: str = None,
+) -> str:
+    """Combina características de dos versiones en una figura híbrida.
+
+    Usa Claude para mezclar aspectos específicos de cada versión según
+    una instrucción en lenguaje natural. El resultado se guarda como
+    nueva versión y se abre en Inkscape.
+
+    Ejemplos de instrucciones:
+    - "usa la estructura y posiciones de la v3 pero los colores de la v5"
+    - "conserva las flechas y conectores de la v4, pero el texto de la v2"
+    - "toma los bloques de la v1 y aplica el estilo de bordes y paleta de la v6"
+    - "mantén el layout de la v3 pero cambia las etiquetas por las de la v5"
+
+    Args:
+        version_a: Primera versión fuente (ver gallery_versions() o list_versions())
+        version_b: Segunda versión fuente
+        instruction: Qué tomar de cada versión, en español o inglés
+        svg_path: SVG de trabajo (usa la figura actual si se omite)
+
+    Returns:
+        Confirmación con número de versión del resultado.
+        Usa render_preview() para verificar visualmente la mezcla.
+    """
+    target = svg_path or _session.get("current_svg")
+    if not target:
+        return "No hay ninguna figura abierta. Usa create_figure() primero."
+
+    vm = _vm(target)
+    history = vm.list()
+
+    try:
+        path_a = vm.get_path(version_a)
+        path_b = vm.get_path(version_b)
+    except (ValueError, FileNotFoundError) as e:
+        return f"No se pudo acceder a las versiones: {e}"
+
+    svg_a = path_a.read_text(encoding="utf-8")
+    svg_b = path_b.read_text(encoding="utf-8")
+    comment_a = history[version_a - 1]["comment"]
+    comment_b = history[version_b - 1]["comment"]
+
+    client = _client()
+    response = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=8192,
+        messages=[
+            {
+                "role": "user",
+                "content": _PROMPT_MEZCLAR.format(
+                    version_a=version_a,
+                    comment_a=comment_a,
+                    svg_a=svg_a,
+                    version_b=version_b,
+                    comment_b=comment_b,
+                    svg_b=svg_b,
+                    instruction=instruction,
+                ),
+            }
+        ],
+    )
+
+    merged_svg = clean_svg_response(response.content[0].text)
+
+    # Guardar estado actual como respaldo antes de aplicar la mezcla
+    backup_num = vm.save(f"Respaldo antes de mezclar v{version_a}+v{version_b}")
+
+    # Escribir la figura mezclada como archivo activo
+    Path(target).write_text(merged_svg, encoding="utf-8")
+
+    # Registrar la mezcla como nueva versión
+    merge_num = vm.save(f"merge v{version_a}+v{version_b}: {instruction[:60]}")
+
+    reload_msg = _session["inkscape"].reload_file(target)
+
+    return (
+        f"Figura mezclada — guardada como v{merge_num}.\n"
+        f"  Fuente A: v{version_a} — {comment_a}\n"
+        f"  Fuente B: v{version_b} — {comment_b}\n"
+        f"  Instrucción: {instruction}\n"
+        f"  Respaldo del estado anterior: v{backup_num}\n"
+        f"Inkscape: {reload_msg}\n\n"
+        f"Usa render_preview() para verificar el resultado.\n"
+        f"Si no quedó bien, restore_version({backup_num}) deshace la mezcla."
+    )
 
 
 @mcp.tool()
