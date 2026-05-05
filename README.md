@@ -65,7 +65,7 @@ En síntesis: pedirle a Claude un SVG en el chat es como pedirle a alguien que t
 | `validate_figure` | Verifica la sintaxis XML y la estructura semántica del SVG |
 | `optimize_figure` | Limpia el SVG con Scour para reducir su tamaño antes de entregar |
 | `export_figure` | Exporta a PDF, PNG, SVG o EPS para incluir en el artículo |
-| `describe_figure` | Lista los elementos de la figura con sus IDs para facilitar ediciones |
+| `token_usage` | Muestra tokens consumidos en la sesión con estimación de costo y ahorro por caché |
 
 **Tipos de figura soportados:** diagramas de bloques, diagramas de flujo, grafos.
 
@@ -300,6 +300,72 @@ merge_versions(3, 5,         → crear versión híbrida
 render_preview()             → Claude verifica que la mezcla quedó bien
        ↓
 optimize_figure()  →  export_figure()
+```
+
+---
+
+## Consumo de tokens y optimizaciones
+
+### ¿MCP Draw consume más tokens que el chat?
+
+Para sesiones largas, el MCP es **más eficiente** que el chat porque cada llamada a la API es independiente y no acumula historial. En el chat, el SVG aparece en el turno 2, en el 3, en el 4… creciendo en O(n²). En el MCP cada herramienta es una llamada fresca.
+
+El cuello de botella real es `edit_figure()`: en cada edición se envía el SVG entero como entrada (~4 000 tokens) y se recibe el SVG entero como salida (~4 000 tokens). Tres optimizaciones atacan esto:
+
+### Optimización 1 — Prompt caching (entrada)
+
+El bloque "sistema + SVG actual" se marca con `cache_control: ephemeral`. Si el estudiante hace dos ediciones seguidas sin que cambie el SVG base, la segunda llamada **lee el SVG desde caché** en lugar de reenviarlo:
+
+| Llamada | Tokens entrada | Costo relativo |
+|---|---|---|
+| Primera edición (cache miss) | ~4 300 | 100 % |
+| Segunda edición (cache hit) | ~300 + 60 | ~9 % |
+
+El caché dura 5 minutos. Cubre sesiones de edición activa.
+
+### Optimización 2 — Modo diff (salida)
+
+Para cambios de atributos en elementos existentes (colores, tamaños, texto), Claude devuelve un JSON pequeño en lugar del SVG completo. El MCP aplica los cambios localmente:
+
+```
+Instrucción: "cambia el bloque clasificador a azul"
+
+Sin diff: output = SVG completo (~4 000 tokens, $0.30)
+Con diff: output = {"mode":"diff","changes":[{"id":"block-clasificador","attr":"fill","value":"#2C5F8A"}]}
+                   (~25 tokens, $0.002)   →  ahorro ~99 % en salida
+```
+
+Para cambios estructurales (añadir/eliminar elementos) Claude sigue devolviendo el SVG completo automáticamente.
+
+### Optimización 3 — Herramientas sin costo
+
+La mayoría de las herramientas no consumen tokens API:
+
+| Costo 0 tokens | Costo API |
+|---|---|
+| `render_preview`, `validate_figure` | `create_figure` |
+| `optimize_figure`, `diff_versions` | `edit_figure` |
+| `gallery_versions`, `describe_figure` | `merge_versions` |
+| `list_versions`, `restore_version` | |
+| `export_figure`, `token_usage` | |
+
+### Ver el consumo en tiempo real
+
+```
+Muéstrame cuántos tokens hemos usado en esta sesión
+```
+
+Salida ejemplo:
+```
+Uso de tokens — sesión actual (5 llamadas)
+
+  Entrada:          12,430 tokens
+  Salida:           18,200 tokens
+  Caché escritura:   4,100 tokens
+  Caché lectura:     8,200 tokens  (40% de la entrada)
+
+  Costo estimado:   ~$0.0145 USD
+  Ahorro por caché: ~$0.0109 USD
 ```
 
 ---
