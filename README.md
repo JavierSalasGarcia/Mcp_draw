@@ -6,6 +6,49 @@ Diseñado para tesistas de ingeniería (electrónica, computación, IA) que nece
 
 ---
 
+## ¿Por qué un MCP y no simplemente pedirle a Claude que haga el SVG?
+
+Es una pregunta válida: Claude puede generar código SVG directamente en el chat sin ninguna instalación. Entonces, ¿qué cambia al usar este MCP?
+
+### Lo que pasa cuando le pides a Claude un SVG en el chat
+
+1. Claude escribe el código SVG como texto en la conversación
+2. Tú copias ese texto, abres un editor de texto, lo pegas y guardas el archivo como `figura.svg`
+3. Abres Inkscape manualmente y cargas el archivo
+4. Si quieres un cambio, vuelves al chat, pegas el SVG completo, describes el cambio, copias la respuesta, vuelves al archivo, lo reemplazas, guardas, y recargas Inkscape
+5. Si la figura es compleja, el SVG puede tener 200-400 líneas — todo eso ocupa espacio en la conversación y hace que el historial se vuelva lento e inmanejable
+
+Funciona, pero el ciclo de edición es completamente manual y se vuelve tedioso rápidamente.
+
+### Lo que hace diferente este MCP
+
+El MCP le da a Claude acceso directo al sistema de archivos y a Inkscape. Esto cambia el flujo de tres formas concretas:
+
+**1. Lee tu boceto como archivo, no como descripción**
+Con el chat, tienes que describir con palabras lo que dibujaste, o pegar la imagen. Con el MCP, Claude abre directamente la foto de tu boceto desde tu disco y la analiza junto con el pie de figura. El resultado es más fiel a lo que quisiste dibujar porque Claude ve exactamente lo que trazaste.
+
+**2. La edición es un ciclo directo, sin copiar y pegar**
+Cuando dices "cambia el bloque clasificador a azul", el MCP escribe el cambio al archivo SVG en disco e Inkscape se recarga automáticamente. Tú ves el resultado en segundos. En el chat, ese mismo cambio requiere que copies el SVG actual, lo pegues en la conversación, esperes la respuesta, copies la respuesta y la pegues de vuelta en el archivo.
+
+**3. La figura existe fuera de la conversación**
+En el chat, el SVG vive en el historial de mensajes. Si empiezas una nueva conversación, perdiste el contexto. Con el MCP, el archivo está en tu disco (`~/mcp_draw_figures/`), Inkscape lo tiene abierto, y el MCP sabe cuál es la figura activa aunque reinicies la sesión — solo le das la ruta del archivo y retoma desde ahí.
+
+### Resumen comparativo
+
+| | Claude en el chat | MCP Draw |
+|---|---|---|
+| Entrada | Descripción de texto o imagen pegada | Foto del boceto leída directamente del disco |
+| Guardar el SVG | Manual (copiar y pegar) | Automático |
+| Abrir en Inkscape | Manual | Automático |
+| Editar | Copiar SVG → chat → copiar respuesta → reemplazar archivo | Escribir instrucción → Inkscape se recarga |
+| Historial de chat | Se llena con código SVG | Solo contiene instrucciones y confirmaciones |
+| Persistencia entre sesiones | Ninguna | El archivo queda en disco |
+| Exportar a PDF/PNG | Manual desde Inkscape | Un comando desde el chat |
+
+En síntesis: pedirle a Claude un SVG en el chat es como pedirle a alguien que te dicte el código de tu figura por teléfono. El MCP es como tener a esa persona sentada frente a la computadora, con acceso a tus archivos y a Inkscape, haciendo los cambios directamente mientras tú observas.
+
+---
+
 ## ¿Qué hace?
 
 | Herramienta | Descripción |
