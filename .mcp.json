@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mcp-draw": {
+      "command": "python",
+      "args": ["${workspaceFolder}/server.py"],
+      "env": {
+        "ANTHROPIC_API_KEY": "${env:ANTHROPIC_API_KEY}"
+      }
+    }
+  }
+}
